@@ -18,6 +18,7 @@ jobs:
   test:
     name: Testing stage
     runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
     defaults:
       run:
         working-directory: ./src
@@ -42,7 +43,6 @@ jobs:
   build-and-push:
     name: Build & Push Docker Image
     runs-on: ubuntu-22.04
-    needs: [test]
     if: github.event_name == 'push'
     
     steps:
