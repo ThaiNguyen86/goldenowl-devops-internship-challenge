@@ -1,0 +1,93 @@
+name: CI - Build and Test
+
+on:
+  pull_request:
+    branches:
+      - development
+      - master
+  push:
+    branches:
+      - development
+      - master
+
+env:
+  NODE_VERSION: '18'
+  DOCKER_IMAGE: 'ngtthai/goldenowl-app'
+
+jobs:
+  test:
+    name: Testing stage
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: ./src
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: './src/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Tests
+        run: npm test
+
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
+      - name: Get short SHA
+        id: vars
+        run: echo "sha_short=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_ENV
+
+      - name: Generate Docker tags
+        id: meta
+        run: |
+          if [ "${GITHUB_REF##*/}" = "master" ]; then
+            echo "TAG=prod-${sha_short}" >> $GITHUB_ENV
+            echo "NODE_ENV=production" >> $GITHUB_ENV
+          else
+            echo "TAG=dev-${sha_short}" >> $GITHUB_ENV
+            echo "NODE_ENV=development" >> $GITHUB_ENV
+          fi
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src
+          file: ./src/Dockerfile
+          push: true
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_ENV=${{ env.NODE_ENV }}
+
+      - name: Build Success
+        run: |
+          echo "Docker image built and pushed successfully!"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:${{ env.TAG }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "SHA: ${{ github.sha }}"
