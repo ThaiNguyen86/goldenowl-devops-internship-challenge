@@ -3,8 +3,18 @@ FROM node:18-alpine AS build
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev && \
+
+# Dùng biến build-time để kiểm soát cài devDependencies
+ARG NODE_ENV=production
+ENV NODE_ENV=$NODE_ENV
+
+RUN if [ "$NODE_ENV" = "production" ]; then \
+      npm ci --omit=dev; \
+    else \
+      npm ci; \
+    fi && \
     npm cache clean --force
+
 COPY . .
 
 # Production stage
@@ -19,5 +29,8 @@ RUN adduser -D goldenowl && \
 USER goldenowl
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:3000/', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
 CMD ["npm", "start"]

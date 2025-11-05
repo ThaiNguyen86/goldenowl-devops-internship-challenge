@@ -27,7 +27,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -58,16 +58,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_PAT }}
 
+      - name: Get short SHA
+        id: vars
+        run: echo "sha_short=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_ENV
+
       - name: Generate Docker tags
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
-            type=raw,value=prod-latest,enable=${{ github.ref == 'refs/origin/master' }}
-            type=raw,value=dev-latest,enable=${{ github.ref == 'refs/origin/development' }}
+        run: |
+          if [ "${GITHUB_REF##*/}" = "master" ]; then
+            echo "TAG=prod-${sha_short}" >> $GITHUB_ENV
+            echo "NODE_ENV=production" >> $GITHUB_ENV
+          else
+            echo "TAG=dev-${sha_short}" >> $GITHUB_ENV
+            echo "NODE_ENV=development" >> $GITHUB_ENV
+          fi
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
@@ -75,18 +79,15 @@ jobs:
           context: ./src
           file: ./src/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            NODE_ENV=production
-
+            NODE_ENV=${{ env.NODE_ENV }}
 
       - name: Build Success
         run: |
           echo "Docker image built and pushed successfully!"
-          echo "Image: ${{ env.DOCKER_IMAGE }}"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:${{ env.TAG }}"
           echo "Branch: ${{ github.ref_name }}"
           echo "SHA: ${{ github.sha }}"
-
