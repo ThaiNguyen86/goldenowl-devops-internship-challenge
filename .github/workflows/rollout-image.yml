@@ -7,38 +7,5 @@ jobs:
   noop:
     runs-on: ubuntu-22.04
     steps:
-      - run: echo "This workflow is disabled; use cd-workflow.yml"
-          EOS
-          CMD_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --comment "Rollout container ${IMAGE_REF}" \
-            --targets Key=tag:Environment,Values=${ENVIRONMENT} \
-            --parameters commands="$(sed 's/"/\\"/g' /tmp/rollout.sh)" \
-            --query 'Command.CommandId' \
-            --output text)
-
-          echo "CommandId=${CMD_ID}"
-
-          for i in $(seq 1 30); do
-            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query 'CommandInvocations[*].Status' --output text | tr '\n' ' ')
-            echo "SSM status: $STATUS"
-            if echo "$STATUS" | grep -q "Success"; then
-              echo "Rollout succeeded"
-              exit 0
-            fi
-            if echo "$STATUS" | grep -Eq "Failed|TimedOut|Cancelled"; then
-              echo "Rollout failed with status: $STATUS"
-              exit 1
-            fi
-            sleep 10
-          done
-          echo "Timeout waiting for SSM command to complete"
-          exit 1
-
-      - name: Summary
-        run: |
-          echo "## Container Rollout Completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Environment: ${ENVIRONMENT}" >> $GITHUB_STEP_SUMMARY
-          echo "- Image: ${{ env.DOCKER_REPO }}:${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ALB: ${{ steps.tfout.outputs.alb_dns }}" >> $GITHUB_STEP_SUMMARY
-          echo "- App Port: ${{ steps.tfout.outputs.app_port }}" >> $GITHUB_STEP_SUMMARY
+      - name: Disabled notice
+        run: echo "This workflow is disabled; use cd-workflow.yml"
