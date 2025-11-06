@@ -139,9 +139,9 @@ jobs:
     name: Auto-destroy dev after 5 minutes
     runs-on: ubuntu-22.04
     needs: deploy-infra-and-rollout
-    if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
+           (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master') }}
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
