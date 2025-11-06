@@ -82,6 +82,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Select/Create Workspace
         run: |
@@ -123,54 +124,64 @@ jobs:
         if: steps.diff.outputs.infra_changed == 'true' && steps.check_state.outputs.has_existing_infra == 'true'
         run: |
           echo "Destroying existing infrastructure before applying new changes..."
-          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
+          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" 2>&1 | tee /tmp/tf-destroy.log
+          echo "Destroy completed"
 
       - name: Apply infra
         run: |
-          terraform apply -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
+          echo "Starting Terraform apply..."
+          terraform apply -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
+            -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
+            2>&1 | tee /tmp/tf-apply.log
+          echo "Apply completed successfully"
 
       - name: Read outputs
         id: tfout
         run: |
           echo "alb_dns=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+          echo "asg_name=$(terraform output -raw autoscaling_group_name)" >> $GITHUB_OUTPUT
           if terraform output -raw app_port >/dev/null 2>&1; then echo "app_port=$(terraform output -raw app_port)" >> $GITHUB_OUTPUT; else echo "app_port=3000" >> $GITHUB_OUTPUT; fi
 
-      - name: Rollout container via SSM
+      - name: Trigger Instance Refresh
         run: |
-          IMAGE_REF="ngtthai/goldenowl-app:${IMAGE_TAG}"
-          PORT="${{ steps.tfout.outputs.app_port }}"
-          NODE_ENV_VAL="${NODE_ENV}"
-          echo "Rolling out $IMAGE_REF to ENV=${ENVIRONMENT}"
-          cat > /tmp/rollout.sh <<EOS
-          #!/bin/bash
-          set -euxo pipefail
-          CONTAINER=goldenowl-app
-          IMAGE_REF="${IMAGE_REF}"
-          PORT="${PORT}"
-          NODE_ENV="${NODE_ENV_VAL}"
-          docker rm -f "$CONTAINER" 2>/dev/null || true
-          docker pull "$IMAGE_REF"
-          docker run -d \
-            --name "$CONTAINER" \
-            --restart always \
-            -e NODE_ENV=${NODE_ENV} \
-            -p ${PORT}:${PORT} \
-            "$IMAGE_REF"
-          EOS
-          CMD_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --targets Key=tag:Environment,Values=${ENVIRONMENT} \
-            --parameters commands="$(sed 's/"/\\"/g' /tmp/rollout.sh)" \
-            --query 'Command.CommandId' --output text)
-          echo "CommandId=${CMD_ID}"
-          for i in $(seq 1 30); do
-            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query 'CommandInvocations[*].Status' --output text | tr '\n' ' ')
-            echo "SSM status: $STATUS"
-            echo "$STATUS" | grep -q Success && exit 0
-            echo "$STATUS" | grep -Eq "Failed|TimedOut|Cancelled" && exit 1
-            sleep 10
+          ASG_NAME="${{ steps.tfout.outputs.asg_name }}"
+          echo "Triggering instance refresh for ASG: $ASG_NAME"
+          
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":300}' \
+            --query 'InstanceRefreshId' --output text)
+          
+          echo "Instance Refresh ID: $REFRESH_ID"
+          echo "Waiting for instance refresh to complete..."
+          
+          for i in $(seq 1 60); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' --output text)
+            
+            PERCENTAGE=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].PercentageComplete' --output text)
+            
+            echo "Instance Refresh status: $STATUS ($PERCENTAGE% complete)"
+            
+            if [ "$STATUS" = "Successful" ]; then
+              echo "Instance refresh completed successfully!"
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "Instance refresh failed with status: $STATUS"
+              exit 1
+            fi
+            
+            sleep 30
           done
-          echo "Timeout waiting for SSM command"
+          
+          echo "Timeout waiting for instance refresh to complete"
           exit 1
 
   auto-destroy-dev:
@@ -201,6 +212,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Select Workspace dev & init
         run: |
@@ -212,4 +224,11 @@ jobs:
         run: sleep 300
 
       - name: Destroy dev infra
-        run: terraform destroy -auto-approve -input=false -var-file="environments/dev.tfvars"
+        run: |
+          echo "Starting dev infrastructure destruction..."
+          terraform destroy -auto-approve -input=false \
+            -var-file="environments/dev.tfvars" \
+            -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
+            2>&1 | tee /tmp/tf-destroy-dev.log
+          echo "Dev infrastructure destroyed successfully"
