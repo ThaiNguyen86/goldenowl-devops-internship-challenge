@@ -1,0 +1,469 @@
+name: CD - Apply Infra and Rollout after CI
+
+on:
+  workflow_run:
+    workflows: ["CI - Build and Test"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy (dev|prod)"
+        required: false
+        default: "dev"
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  TF_VERSION: '1.9.0'
+  AWS_REGION: 'ap-southeast-1'
+  WORKING_DIR: './terra-config'
+
+concurrency:
+  group: terraform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  
+  terraform-validate:
+    name: Terraform Validate & Format Check
+    deploy-infra-and-rollout:
+      name: Deploy infra and rollout container
+      runs-on: ubuntu-22.04
+      if: >-
+        ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+            || github.event_name == 'workflow_dispatch' }}
+      defaults:
+        run:
+          working-directory: ${{ env.WORKING_DIR }}
+      steps:
+        - name: Checkout code at CI commit
+          uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+            fetch-depth: 2
+
+        - name: Determine environment
+          id: env
+          run: |
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              ENV_INP='${{ github.event.inputs.environment }}'
+              [ -z "$ENV_INP" ] && ENV_INP=dev
+              if [ "$ENV_INP" = "prod" ]; then echo "ENVIRONMENT=prod" >> $GITHUB_ENV; echo "IMAGE_TAG=latest" >> $GITHUB_ENV; echo "NODE_ENV=production" >> $GITHUB_ENV; else echo "ENVIRONMENT=dev" >> $GITHUB_ENV; echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV; echo "NODE_ENV=development" >> $GITHUB_ENV; fi
+            else
+              BRANCH='${{ github.event.workflow_run.head_branch }}'
+              if [ "$BRANCH" = "master" ]; then echo "ENVIRONMENT=prod" >> $GITHUB_ENV; echo "IMAGE_TAG=latest" >> $GITHUB_ENV; echo "NODE_ENV=production" >> $GITHUB_ENV; else echo "ENVIRONMENT=dev" >> $GITHUB_ENV; echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV; echo "NODE_ENV=development" >> $GITHUB_ENV; fi
+            fi
+            echo "ENVIRONMENT=${ENVIRONMENT}"
+
+        - name: Configure AWS Credentials
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: ${{ env.AWS_REGION }}
+
+        - name: Setup Terraform
+          uses: hashicorp/setup-terraform@v3
+          with:
+            terraform_version: ${{ env.TF_VERSION }}
+
+        - name: Select/Create Workspace
+          run: |
+            terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
+
+        - name: Terraform Init
+          run: terraform init
+
+        - name: Detect infra changes
+          id: diff
+          shell: bash
+          run: |
+            set -e
+            CHANGED=$(git diff --name-only HEAD^ HEAD || true)
+            echo "Changed files:\n$CHANGED"
+            if echo "$CHANGED" | grep -E '^terra-config/'; then
+              echo "infra_changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "infra_changed=false" >> $GITHUB_OUTPUT
+            fi
+
+        - name: Destroy (only if infra changed)
+          if: steps.diff.outputs.infra_changed == 'true'
+          run: |
+            terraform destroy -auto-approve -var-file="environments/${ENVIRONMENT}.tfvars"
+
+        - name: Apply infra
+          run: |
+            terraform apply -auto-approve -var-file="environments/${ENVIRONMENT}.tfvars"
+
+        - name: Read outputs
+          id: tfout
+          run: |
+            echo "alb_dns=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+            if terraform output -raw app_port >/dev/null 2>&1; then echo "app_port=$(terraform output -raw app_port)" >> $GITHUB_OUTPUT; else echo "app_port=3000" >> $GITHUB_OUTPUT; fi
+
+        - name: Rollout container via SSM
+          run: |
+            IMAGE_REF="ngtthai/goldenowl-app:${IMAGE_TAG}"
+            PORT="${{ steps.tfout.outputs.app_port }}"
+            NODE_ENV_VAL="${NODE_ENV}"
+            echo "Rolling out $IMAGE_REF to ENV=${ENVIRONMENT}"
+            cat > /tmp/rollout.sh <<EOS
+            #!/bin/bash
+            set -euxo pipefail
+            CONTAINER=goldenowl-app
+            IMAGE_REF="${IMAGE_REF}"
+            PORT="${PORT}"
+            NODE_ENV="${NODE_ENV_VAL}"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            docker pull "$IMAGE_REF"
+            docker run -d \
+              --name "$CONTAINER" \
+              --restart always \
+              -e NODE_ENV=${NODE_ENV} \
+              -p ${PORT}:${PORT} \
+              "$IMAGE_REF"
+            EOS
+            CMD_ID=$(aws ssm send-command \
+              --document-name "AWS-RunShellScript" \
+              --targets Key=tag:Environment,Values=${ENVIRONMENT} \
+              --parameters commands="$(sed 's/"/\\"/g' /tmp/rollout.sh)" \
+              --query 'Command.CommandId' --output text)
+            echo "CommandId=${CMD_ID}"
+            for i in $(seq 1 30); do
+              STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query 'CommandInvocations[*].Status' --output text | tr '\n' ' ')
+              echo "SSM status: $STATUS"
+              echo "$STATUS" | grep -q Success && exit 0
+              echo "$STATUS" | grep -Eq "Failed|TimedOut|Cancelled" && exit 1
+              sleep 10
+            done
+            echo "Timeout waiting for SSM command"
+            exit 1
+
+    auto-destroy-dev:
+      name: Auto-destroy dev after 5 minutes
+      runs-on: ubuntu-22.04
+      needs: deploy-infra-and-rollout
+      if: |
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')
+      defaults:
+        run:
+          working-directory: ${{ env.WORKING_DIR }}
+      steps:
+        - name: Checkout code at CI commit
+          uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+        - name: Configure AWS Credentials
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: ${{ env.AWS_REGION }}
+
+        - name: Setup Terraform
+          uses: hashicorp/setup-terraform@v3
+          with:
+            terraform_version: ${{ env.TF_VERSION }}
+
+        - name: Select Workspace dev & init
+          run: |
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            terraform workspace select dev || terraform workspace new dev
+            terraform init
+
+        - name: Wait 5 minutes
+          run: sleep 300
+
+        - name: Destroy dev infra
+          run: terraform destroy -auto-approve -var-file="environments/dev.tfvars"
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.WORKING_DIR }}/tfplan.txt', 'utf8');
+            const truncatedPlan = plan.length > 65000 ? plan.substring(0, 65000) + '\n... (truncated)' : plan;
+            
+            const output = `### Terraform Plan 
+            
+            <details>
+            <summary>Show Plan</summary>
+            
+            \`\`\`terraform
+            ${truncatedPlan}
+            \`\`\`
+            
+            </details>
+            
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Plan Status Check
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-22.04
+    needs: terraform-plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment:
+      name: production
+      url: ${{ steps.apply.outputs.alb_url }}
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine environment from branch
+        run: |
+          if [ "${GITHUB_REF##*/}" = "master" ]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          fi
+          echo "Environment set to: ${ENVIRONMENT}"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Select/Create Terraform Workspace
+        run: |
+          terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: ${{ env.WORKING_DIR }}
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply -auto-approve tfplan
+          
+          if terraform output -raw application_url_https >/dev/null 2>&1; then
+            APP_URL=$(terraform output -raw application_url_https)
+          else
+            APP_URL=$(terraform output -raw application_url)
+          fi
+          echo "alb_url=${APP_URL}" >> $GITHUB_OUTPUT
+
+      - name: Get Infrastructure Outputs
+        id: outputs
+        run: |
+          echo "vpc_id=$(terraform output -raw vpc_id)" >> $GITHUB_OUTPUT
+          echo "alb_dns=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+          echo "asg_name=$(terraform output -raw autoscaling_group_name)" >> $GITHUB_OUTPUT
+          if terraform output -raw app_fqdn >/dev/null 2>&1; then echo "app_fqdn=$(terraform output -raw app_fqdn)" >> $GITHUB_OUTPUT; fi
+
+      - name: Apply Summary
+        run: |
+          echo "## Infrastructure Deployed Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Infrastructure Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **VPC ID**: ${{ steps.outputs.outputs.vpc_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Load Balancer DNS**: ${{ steps.outputs.outputs.alb_dns }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auto Scaling Group**: ${{ steps.outputs.outputs.asg_name }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.outputs.outputs.app_fqdn }}" ]; then echo "- **App FQDN**: ${{ steps.outputs.outputs.app_fqdn }}" >> $GITHUB_STEP_SUMMARY; fi
+          echo "- **Application URL**: [${{ steps.apply.outputs.alb_url }}](${{ steps.apply.outputs.alb_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Access Your Application" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "curl ${{ steps.apply.outputs.alb_url }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+
+  terraform-apply-dev:
+    name: Terraform Apply (Dev, auto-destroy)
+    runs-on: ubuntu-22.04
+    needs: terraform-plan
+    if: github.event_name == 'push' && github.ref != 'refs/heads/master'
+    environment:
+      name: development
+      url: ${{ steps.apply.outputs.alb_url }}
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set ENVIRONMENT=dev
+        run: echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Disable Cloudflare for Dev
+        run: |
+          echo "TF_VAR_enable_cloudflare=false" >> $GITHUB_ENV
+          if [ -n "${{ secrets.DOMAIN_NAME }}" ]; then echo "TF_VAR_domain_name=${{ secrets.DOMAIN_NAME }}" >> $GITHUB_ENV; fi
+
+      - name: Select/Create Terraform Workspace (dev)
+        run: |
+          terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply (Dev)
+        id: apply
+        run: |
+          terraform plan -no-color -var-file="environments/${ENVIRONMENT}.tfvars" -out=tfplan
+          terraform apply -auto-approve tfplan
+          if terraform output -raw application_url_https >/dev/null 2>&1; then
+            APP_URL=$(terraform output -raw application_url_https)
+          else
+            APP_URL=$(terraform output -raw application_url)
+          fi
+          echo "alb_url=${APP_URL}" >> $GITHUB_OUTPUT
+
+      - name: Dev Apply Summary
+        run: |
+          echo "## Dev Infrastructure Deployed (Ephemeral)" >> $GITHUB_STEP_SUMMARY
+          echo "- Environment: dev" >> $GITHUB_STEP_SUMMARY
+          echo "- Application URL: [${{ steps.apply.outputs.alb_url }}](${{ steps.apply.outputs.alb_url }})" >> $GITHUB_STEP_SUMMARY
+          echo "- This environment will be destroyed automatically in ~5 minutes." >> $GITHUB_STEP_SUMMARY
+
+
+  terraform-auto-destroy-dev:
+    name: Auto Destroy (Dev after 5m)
+    runs-on: ubuntu-22.04
+    needs: terraform-apply-dev
+    if: github.event_name == 'push' && github.ref != 'refs/heads/master' && needs.terraform-apply-dev.result == 'success'
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Select Workspace (dev) and Init
+        run: |
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
+          terraform init
+
+      - name: Wait 5 minutes before destroy
+        run: sleep 300
+
+      - name: Terraform Destroy (Dev)
+        run: terraform destroy -auto-approve -var-file="environments/${ENVIRONMENT}.tfvars"
+
+      - name: Auto-Destroy Summary
+        run: |
+          echo "## Dev Environment Destroyed Automatically" >> $GITHUB_STEP_SUMMARY
+          echo "The ephemeral dev environment has been cleaned up after ~5 minutes." >> $GITHUB_STEP_SUMMARY
+
+      - name: Test Application
+        if: ${{ false }}
+        run: |
+          echo "Waiting for ALB to be ready..."
+          sleep 60
+          
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if curl -s -o /dev/null -w "%{http_code}" ${{ steps.apply.outputs.alb_url }} | grep -q "200"; then
+              echo "Application is healthy!"
+              exit 0
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Retry $RETRY_COUNT/$MAX_RETRIES..."
+            sleep 30
+          done
+          
+          echo "Application health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+  
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    environment:
+      name: production-destroy
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
+
+      - name: Destroy Summary
+        run: |
+          echo "## Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "All AWS resources have been destroyed." >> $GITHUB_STEP_SUMMARY
