@@ -1,7 +1,11 @@
-node_modules
-build
-npm-debug.log
-.nyc
+node_modules/
+build/
+dist/
+npm-debug.log*
+coverage/
+.nyc_output/
 .env
+.env.*
 .DS_Store
-.env
+.vscode/
+.idea/
