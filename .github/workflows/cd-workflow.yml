@@ -82,6 +82,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Select/Create Workspace
         run: |
@@ -123,11 +124,14 @@ jobs:
         if: steps.diff.outputs.infra_changed == 'true' && steps.check_state.outputs.has_existing_infra == 'true'
         run: |
           echo "Destroying existing infrastructure before applying new changes..."
-          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
+          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" 2>&1 | tee /tmp/tf-destroy.log
+          echo "Destroy completed"
 
       - name: Apply infra
         run: |
-          terraform apply -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
+          echo "Starting Terraform apply..."
+          terraform apply -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" 2>&1 | tee /tmp/tf-apply.log
+          echo "Apply completed successfully"
 
       - name: Read outputs
         id: tfout
@@ -201,6 +205,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Select Workspace dev & init
         run: |
@@ -212,4 +217,7 @@ jobs:
         run: sleep 300
 
       - name: Destroy dev infra
-        run: terraform destroy -auto-approve -input=false -var-file="environments/dev.tfvars"
+        run: |
+          echo "Starting dev infrastructure destruction..."
+          terraform destroy -auto-approve -input=false -var-file="environments/dev.tfvars" 2>&1 | tee /tmp/tf-destroy-dev.log
+          echo "Dev infrastructure destroyed successfully"
