@@ -198,7 +198,7 @@ jobs:
     name: Auto-destroy dev after 5 minutes
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-  needs: deploy-infra
+    needs: deploy-infra
     if: >-
       ${{ always() && ((github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
            (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')) }}
