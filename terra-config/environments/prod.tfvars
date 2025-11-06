@@ -8,6 +8,4 @@ ssh_allowed_cidrs = []
 
 domain_name       = "project3cloudinus.click"
 dns_record_name   = "goldenowl-app"
-# enable_cloudflare = true
-# cloudflare_zone_id = ""
-# cloudflare_proxied = true
+
