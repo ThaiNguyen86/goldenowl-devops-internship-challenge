@@ -24,6 +24,7 @@ jobs:
   deploy-infra-and-rollout:
     name: Deploy infra and rollout container
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     if: >-
       ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
           || github.event_name == 'workflow_dispatch' }}
@@ -43,12 +44,32 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV_INP='${{ github.event.inputs.environment }}'
             [ -z "$ENV_INP" ] && ENV_INP=dev
-            if [ "$ENV_INP" = "prod" ]; then echo "ENVIRONMENT=prod" >> $GITHUB_ENV; echo "IMAGE_TAG=latest" >> $GITHUB_ENV; echo "NODE_ENV=production" >> $GITHUB_ENV; else echo "ENVIRONMENT=dev" >> $GITHUB_ENV; echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV; echo "NODE_ENV=development" >> $GITHUB_ENV; fi
+            if [ "$ENV_INP" = "prod" ]; then
+              ENV_VAL="prod"
+              echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+              echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+              echo "NODE_ENV=production" >> $GITHUB_ENV
+            else
+              ENV_VAL="dev"
+              echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+              echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV
+              echo "NODE_ENV=development" >> $GITHUB_ENV
+            fi
           else
             BRANCH='${{ github.event.workflow_run.head_branch }}'
-            if [ "$BRANCH" = "master" ]; then echo "ENVIRONMENT=prod" >> $GITHUB_ENV; echo "IMAGE_TAG=latest" >> $GITHUB_ENV; echo "NODE_ENV=production" >> $GITHUB_ENV; else echo "ENVIRONMENT=dev" >> $GITHUB_ENV; echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV; echo "NODE_ENV=development" >> $GITHUB_ENV; fi
+            if [ "$BRANCH" = "master" ]; then
+              ENV_VAL="prod"
+              echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+              echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+              echo "NODE_ENV=production" >> $GITHUB_ENV
+            else
+              ENV_VAL="dev"
+              echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+              echo "IMAGE_TAG=dev-latest" >> $GITHUB_ENV
+              echo "NODE_ENV=development" >> $GITHUB_ENV
+            fi
           fi
-          echo "ENVIRONMENT=${ENVIRONMENT}"
+          echo "Deploying to environment: ${ENV_VAL}"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -67,29 +88,46 @@ jobs:
           terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -input=false
 
       - name: Detect infra changes
         id: diff
         shell: bash
         run: |
           set -e
-          CHANGED=$(git diff --name-only HEAD^ HEAD || true)
-          echo "Changed files:\n$CHANGED"
-          if echo "$CHANGED" | grep -E '^terra-config/'; then
+          CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo "")
+          echo "Changed files:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^terra-config/'; then
             echo "infra_changed=true" >> $GITHUB_OUTPUT
+            echo "Infrastructure code has changed"
           else
             echo "infra_changed=false" >> $GITHUB_OUTPUT
+            echo "No infrastructure changes detected"
           fi
 
-      - name: Destroy (only if infra changed)
-        if: steps.diff.outputs.infra_changed == 'true'
+      - name: Check if existing infra exists
+        id: check_state
         run: |
-          terraform destroy -auto-approve -var-file="environments/${ENVIRONMENT}.tfvars"
+          STATE_COUNT=$(terraform state list 2>/dev/null | wc -l || echo "0")
+          echo "Existing resources count: ${STATE_COUNT}"
+          if [ "$STATE_COUNT" -gt 0 ]; then
+            echo "has_existing_infra=true" >> $GITHUB_OUTPUT
+            echo "Found ${STATE_COUNT} existing resources in state"
+          else
+            echo "has_existing_infra=false" >> $GITHUB_OUTPUT
+            echo "No existing infrastructure found"
+          fi
+
+      - name: Destroy existing infra (only if infra changed AND existing infra exists)
+        if: steps.diff.outputs.infra_changed == 'true' && steps.check_state.outputs.has_existing_infra == 'true'
+        run: |
+          echo "Destroying existing infrastructure before applying new changes..."
+          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
 
       - name: Apply infra
         run: |
-          terraform apply -auto-approve -var-file="environments/${ENVIRONMENT}.tfvars"
+          terraform apply -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars"
 
       - name: Read outputs
         id: tfout
@@ -138,6 +176,7 @@ jobs:
   auto-destroy-dev:
     name: Auto-destroy dev after 5 minutes
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     needs: deploy-infra-and-rollout
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
@@ -167,16 +206,10 @@ jobs:
         run: |
           echo "ENVIRONMENT=dev" >> $GITHUB_ENV
           terraform workspace select dev || terraform workspace new dev
-          terraform init
+          terraform init -input=false
 
       - name: Wait 5 minutes
         run: sleep 300
 
       - name: Destroy dev infra
-        run: terraform destroy -auto-approve -var-file="environments/dev.tfvars"
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+        run: terraform destroy -auto-approve -input=false -var-file="environments/dev.tfvars"
