@@ -1,0 +1,55 @@
+# Root ignores for app + infra repo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-error.log
+pnpm-debug.log*
+coverage/
+.nyc_output/
+
+# Env & credentials (security)
+.env
+.env.*
+.envrc
+.aws/
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+*.der
+*.keystore
+*.jks
+
+# Docker
+.docker/
+*.tar
+
+# Terraform (keep lock file tracked)
+.terraform/
+.terraform.*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+# Keep environment-specific tfvars tracked
+!terra-config/environments/*.tfvars
+terraform.tfvars
+crash.log
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+build/
+dist/
