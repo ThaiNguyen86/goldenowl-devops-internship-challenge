@@ -10,6 +10,18 @@ on:
         description: "Environment to deploy (dev|prod)"
         required: false
         default: "dev"
+name: CD - Apply Infra and Rollout after CI
+
+on:
+  workflow_run:
+    workflows: ["CI - Build and Test"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy (dev|prod)"
+        required: false
+        default: "dev"
 
 env:
   TF_VERSION: '1.9.0'
@@ -139,9 +151,9 @@ jobs:
     name: Auto-destroy dev after 5 minutes
     runs-on: ubuntu-22.04
     needs: deploy-infra-and-rollout
-    if: >-
-      ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
-           (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master') }}
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -151,6 +163,29 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Select Workspace dev & init
+        run: |
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          terraform workspace select dev || terraform workspace new dev
+          terraform init
+
+      - name: Wait 5 minutes
+        run: sleep 300
+
+      - name: Destroy dev infra
+        run: terraform destroy -auto-approve -var-file="environments/dev.tfvars"
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
