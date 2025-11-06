@@ -1,4 +1,4 @@
-name: CD - Apply Infra and Rollout after CI
+name: CD - Apply Infrastructure (ASG Refresh)
 
 on:
   workflow_run:
@@ -21,8 +21,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy-infra-and-rollout:
-    name: Deploy infra and rollout container
+  deploy-infra:
+    name: Deploy infrastructure (with ASG instance refresh)
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     if: >-
@@ -184,14 +184,24 @@ jobs:
           echo "Timeout waiting for instance refresh to complete"
           exit 1
 
+      - name: Cleanup on Terraform apply failure
+        if: failure()
+        run: |
+          echo "Terraform apply failed, cleaning up resources..."
+          terraform destroy -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
+            -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
+            2>&1 | tee /tmp/tf-destroy-on-fail.log
+
   auto-destroy-dev:
     name: Auto-destroy dev after 5 minutes
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    needs: deploy-infra-and-rollout
+    needs: deploy-infra
     if: >-
-      ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
-           (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master') }}
+      ${{ always() && ((github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
+           (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')) }}
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -220,7 +230,8 @@ jobs:
           terraform workspace select dev || terraform workspace new dev
           terraform init -input=false
 
-      - name: Wait 5 minutes
+      - name: Wait 5 minutes (only on success)
+        if: ${{ needs.deploy-infra.result == 'success' }}
         run: sleep 300
 
       - name: Destroy dev infra
