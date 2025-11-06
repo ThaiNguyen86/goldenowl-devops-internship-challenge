@@ -15,6 +15,43 @@ env:
   DOCKER_IMAGE: 'ngtthai/goldenowl-app'
 
 jobs:
+  tf-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect terra-config changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            infra:
+              - 'terra-config/**'
+
+      - name: Setup Terraform
+        if: steps.filter.outputs.infra == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.0'
+
+      - name: Terraform fmt check
+        if: steps.filter.outputs.infra == 'true'
+        working-directory: ./terra-config
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (no backend)
+        if: steps.filter.outputs.infra == 'true'
+        working-directory: ./terra-config
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        if: steps.filter.outputs.infra == 'true'
+        working-directory: ./terra-config
+        run: terraform validate
+
   test:
     name: Testing stage
     runs-on: ubuntu-22.04
