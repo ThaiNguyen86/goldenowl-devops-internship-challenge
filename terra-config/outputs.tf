@@ -80,7 +80,7 @@ output "app_fqdn" {
 
 output "application_url_https" {
   description = "HTTPS URL to access the application"
-  value       = (var.enable_https && var.domain_name != "") ? ("https://" + (var.dns_record_name == "@" || var.dns_record_name == "" ? var.domain_name : "${var.dns_record_name}.${var.domain_name}")) : ("http://" + aws_lb.main.dns_name)
+  value       = var.enable_https && var.domain_name != "" ? "https://${local.fqdn}" : "http://${aws_lb.main.dns_name}"
 }
 
 output "acm_certificate_arn" {
