@@ -192,20 +192,3 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Select Workspace dev & init
-        run: |
-          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
-          terraform workspace select dev || terraform workspace new dev
-          terraform init
-
-      - name: Wait 5 minutes
-        run: sleep 300
-
-      - name: Destroy dev infra
-        run: terraform destroy -auto-approve -var-file="environments/dev.tfvars"
