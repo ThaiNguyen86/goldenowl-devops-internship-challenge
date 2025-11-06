@@ -91,6 +91,7 @@ variable "docker_repository" {
 variable "enable_https" {
   description = "Enable HTTPS on ALB with ACM certificate and redirect HTTP->HTTPS"
   type        = bool
+  default     = false
 }
 
 variable "domain_name" {
