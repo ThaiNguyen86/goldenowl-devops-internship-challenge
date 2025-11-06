@@ -70,8 +70,8 @@ resource "aws_nat_gateway" "main" {
   depends_on = [aws_internet_gateway.main]
 }
 
- 
- 
+
+
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -98,13 +98,15 @@ resource "aws_route_table" "private" {
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = element(aws_nat_gateway.main[*].id, count.index % length(aws_nat_gateway.main))
+    nat_gateway_id = aws_nat_gateway.main[count.index % local.nat_gateway_count].id
   }
 
   tags = {
     Name        = "${var.project_name}-private-rt-${count.index + 1}"
     Environment = var.environment
   }
+
+  depends_on = [aws_nat_gateway.main]
 }
 
 resource "aws_route_table_association" "private" {
@@ -113,25 +115,79 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private[count.index].id
 }
 
- 
- 
-resource "aws_security_group" "alb" {
-  name        = "${var.project_name}-alb-sg"
-  description = "Security group for Application Load Balancer"
-  vpc_id      = aws_vpc.main.id
+resource "aws_security_group" "vpc_endpoints" {
+  name   = "${var.project_name}-vpc-endpoints-sg"
+  vpc_id = aws_vpc.main.id
 
   ingress {
-    description = "HTTP from Internet"
-    from_port   = 80
-    to_port     = 80
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  tags = {
+    Name        = "${var.project_name}-vpc-endpoints-sg"
+    Environment = var.environment
+  }
+}
+
+resource "aws_vpc_endpoint" "ssm" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name        = "${var.project_name}-ssm-endpoint"
+    Environment = var.environment
+  }
+}
+
+resource "aws_vpc_endpoint" "ssmmessages" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name        = "${var.project_name}-ssmmessages-endpoint"
+    Environment = var.environment
+  }
+}
+
+resource "aws_vpc_endpoint" "ec2messages" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name        = "${var.project_name}-ec2messages-endpoint"
+    Environment = var.environment
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name   = "${var.project_name}-alb-sg"
+  vpc_id = aws_vpc.main.id
+
   ingress {
-    description = "HTTPS from Internet"
-    from_port   = 443
-    to_port     = 443
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -150,12 +206,10 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group" "ec2" {
-  name        = "${var.project_name}-ec2-sg"
-  description = "Security group for EC2 instances"
-  vpc_id      = aws_vpc.main.id
+  name   = "${var.project_name}-ec2-sg"
+  vpc_id = aws_vpc.main.id
 
   ingress {
-    description     = "HTTP from ALB"
     from_port       = var.app_port
     to_port         = var.app_port
     protocol        = "tcp"
@@ -163,7 +217,6 @@ resource "aws_security_group" "ec2" {
   }
 
   ingress {
-    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -221,24 +274,7 @@ resource "aws_lb_target_group" "main" {
   }
 }
 
-resource "aws_lb_listener" "http_redirect" {
-  count             = var.enable_https && var.domain_name != "" ? 1 : 0
-  load_balancer_arn = aws_lb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-}
-
-resource "aws_lb_listener" "http_forward" {
-  count             = var.enable_https && var.domain_name != "" ? 0 : 1
+resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
@@ -264,17 +300,108 @@ data "aws_ami" "ubuntu" {
   }
 }
 
- 
- 
+resource "aws_iam_role" "ec2_ssm_role" {
+  name = "${var.project_name}-ec2-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "${var.project_name}-ec2-ssm-role"
+    Environment = var.environment
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_managed_instance_core" {
+  role       = aws_iam_role.ec2_ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# IAM policy to allow EC2 to read SSM parameters for Docker credentials
+resource "aws_iam_role_policy" "ssm_parameter_access" {
+  name = "${var.project_name}-ssm-parameter-access"
+  role = aws_iam_role.ec2_ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParametersByPath"
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:*:parameter/${var.project_name}/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "${var.project_name}-ec2-profile"
+  role = aws_iam_role.ec2_ssm_role.name
+
+  tags = {
+    Name        = "${var.project_name}-ec2-profile"
+    Environment = var.environment
+  }
+}
+
 locals {
-  env_norm     = lower(var.environment)
-  is_prod      = contains(["prod", "production", "master"], local.env_norm)
-  image_tag    = local.is_prod ? "latest" : "dev-latest"
-  docker_image = "${var.docker_repository}:${local.image_tag}"
-  node_env     = local.is_prod ? "production" : "development"
+  env_norm          = lower(var.environment)
+  is_prod           = contains(["prod", "production", "master"], local.env_norm)
+  image_tag         = local.is_prod ? "latest" : "dev-latest"
+  docker_image      = "${var.docker_repository}:${local.image_tag}"
+  node_env          = local.is_prod ? "production" : "development"
   nat_gateway_count = local.is_prod ? length(var.availability_zones) : 1
-  cert_domain = var.dns_record_name == "@" || var.dns_record_name == "" ? var.domain_name : "${var.dns_record_name}.${var.domain_name}"
-  fqdn        = var.domain_name != "" ? local.cert_domain : aws_lb.main.dns_name
+  use_docker_auth   = var.dockerhub_username != "" && var.dockerhub_token != ""
+}
+
+# Store Docker credentials in AWS Systems Manager Parameter Store
+resource "aws_ssm_parameter" "dockerhub_username" {
+  count       = local.use_docker_auth ? 1 : 0
+  name        = "/${var.project_name}/dockerhub/username"
+  description = "DockerHub username for pulling private images"
+  type        = "String"
+  value       = var.dockerhub_username
+
+  tags = {
+    Name        = "${var.project_name}-dockerhub-username"
+    Environment = var.environment
+  }
+}
+
+resource "aws_ssm_parameter" "dockerhub_token" {
+  count       = local.use_docker_auth ? 1 : 0
+  name        = "/${var.project_name}/dockerhub/token"
+  description = "DockerHub access token for pulling private images"
+  type        = "SecureString"
+  value       = var.dockerhub_token
+
+  tags = {
+    Name        = "${var.project_name}-dockerhub-token"
+    Environment = var.environment
+  }
 }
 
 resource "aws_launch_template" "main" {
@@ -285,7 +412,7 @@ resource "aws_launch_template" "main" {
   key_name = var.key_pair_name
 
   iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_ssm_profile.name
+    name = aws_iam_instance_profile.ec2_profile.name
   }
 
   network_interfaces {
@@ -293,32 +420,111 @@ resource "aws_launch_template" "main" {
     security_groups             = [aws_security_group.ec2.id]
   }
 
-  user_data = base64encode(<<-EOF
-              #!/bin/bash
-              set -e
-              exec > >(tee -a /var/log/user-data.log) 2>&1
-              echo "[BOOTSTRAP] Installing Docker and SSM Agent"
-              
-              apt-get update
-              apt-get install -y docker.io curl snapd
-              systemctl enable --now docker
-              usermod -aG docker ubuntu || true
-              
-              # Install & enable AWS SSM Agent via snap (Ubuntu 22.04)
-              snap install amazon-ssm-agent --classic || true
-              systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-              
-              echo "[INFO] Bootstrap complete. Application container will be managed via SSM commands."
-              EOF
+    user_data = base64encode(<<-EOF
+        #!/bin/bash
+        set -uxo pipefail
+        exec > >(tee -a /var/log/user-data.log) 2>&1
+
+        echo "=== User data script started at $(date) ==="
+
+        # Wait for network connectivity
+        echo "Waiting for internet connectivity..."
+        for i in {1..30}; do
+          if ping -c 1 8.8.8.8 &>/dev/null; then
+            echo "Internet connectivity established"
+            break
+          fi
+          echo "Attempt $i: No internet connectivity, waiting..."
+          sleep 10
+        done
+
+        # Retry apt-get update with exponential backoff
+        echo "Updating package lists..."
+        for i in {1..5}; do
+          if apt-get update -y; then
+            echo "apt-get update successful"
+            break
+          fi
+          echo "apt-get update failed (attempt $i), retrying in $((i * 10)) seconds..."
+          sleep $((i * 10))
+        done
+
+        # Install Docker and AWS CLI
+        echo "Installing Docker and AWS CLI..."
+        for i in {1..3}; do
+          if apt-get install -y docker.io awscli; then
+            echo "Installation successful"
+            break
+          fi
+          echo "Installation failed (attempt $i), retrying..."
+          sleep 10
+        done
+
+        systemctl enable docker
+        systemctl start docker
+
+        usermod -aG docker ubuntu || true
+        usermod -aG docker ssm-user || true
+
+        # Ensure SSM agent is running (for Snap version)
+        snap start amazon-ssm-agent || true
+        systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+        systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+        # Wait for Docker to be ready
+        echo "Waiting for Docker to be ready..."
+        until docker info >/dev/null 2>&1; do 
+          echo "Docker not ready, waiting..."
+          sleep 2
+        done
+        echo "Docker is ready"
+
+        # Login to DockerHub if credentials are available
+        if [ "${local.use_docker_auth}" = "true" ]; then
+          echo "Retrieving Docker credentials from Parameter Store..."
+          DOCKER_USER=$(aws ssm get-parameter --name "/${var.project_name}/dockerhub/username" --region ${var.aws_region} --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          DOCKER_TOKEN=$(aws ssm get-parameter --name "/${var.project_name}/dockerhub/token" --region ${var.aws_region} --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+          
+          if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_TOKEN" ]; then
+            echo "Logging into DockerHub..."
+            echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+            if [ $? -eq 0 ]; then
+              echo "DockerHub login successful"
+            else
+              echo "DockerHub login failed"
+            fi
+          else
+            echo "Docker credentials not found in Parameter Store"
+          fi
+        else
+          echo "Skipping DockerHub login (using public repository)"
+        fi
+
+        # Pull and run application
+        echo "Pulling Docker image: ${local.docker_image}"
+        docker pull "${local.docker_image}"
+        
+        echo "Starting application container..."
+        docker rm -f "goldenowl-app" 2>/dev/null || true
+        docker run -d \
+          --name "goldenowl-app" \
+          --restart always \
+          -e NODE_ENV="${local.node_env}" \
+          -p ${var.app_port}:${var.app_port} \
+          "${local.docker_image}"
+
+        echo "=== User data completed successfully at $(date) ==="
+      EOF
   )
+
 
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name         = "${var.project_name}-instance"
-      Environment  = var.environment
-      DockerImage  = local.docker_image
-      NodeEnv      = local.node_env
+      Name        = "${var.project_name}-instance"
+      Environment = var.environment
+      DockerImage = local.docker_image
+      NodeEnv     = local.node_env
     }
   }
 
@@ -331,18 +537,27 @@ resource "aws_launch_template" "main" {
 }
 
 resource "aws_autoscaling_group" "main" {
-  name                = "${var.project_name}-asg"
-  desired_capacity    = var.asg_desired_capacity
-  min_size            = var.asg_min_size
-  max_size            = var.asg_max_size
-  target_group_arns   = [aws_lb_target_group.main.arn]
-  vpc_zone_identifier = aws_subnet.private[*].id
-  health_check_type   = "ELB"
+  name                      = "${var.project_name}-asg-${aws_launch_template.main.latest_version}"
+  desired_capacity          = var.asg_desired_capacity
+  min_size                  = var.asg_min_size
+  max_size                  = var.asg_max_size
+  target_group_arns         = [aws_lb_target_group.main.arn]
+  vpc_zone_identifier       = aws_subnet.private[*].id
+  health_check_type         = "ELB"
   health_check_grace_period = 300
 
   launch_template {
     id      = aws_launch_template.main.id
     version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+      instance_warmup        = 300
+    }
+    triggers = ["tag"]
   }
 
   tag {
@@ -362,10 +577,18 @@ resource "aws_autoscaling_group" "main" {
     value               = local.docker_image
     propagate_at_launch = true
   }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  depends_on = [
+    aws_nat_gateway.main,
+    aws_route_table.private,
+    aws_route_table_association.private
+  ]
 }
 
- 
- 
 resource "aws_autoscaling_policy" "scale_up" {
   name                   = "${var.project_name}-scale-up"
   scaling_adjustment     = 1
@@ -382,8 +605,6 @@ resource "aws_autoscaling_policy" "scale_down" {
   autoscaling_group_name = aws_autoscaling_group.main.name
 }
 
- 
- 
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   alarm_name          = "${var.project_name}-cpu-high"
   comparison_operator = "GreaterThanThreshold"
@@ -398,8 +619,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
     AutoScalingGroupName = aws_autoscaling_group.main.name
   }
 
-  alarm_description = "This metric monitors ec2 cpu utilization"
-  alarm_actions     = [aws_autoscaling_policy.scale_up.arn]
+  alarm_actions = [aws_autoscaling_policy.scale_up.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "cpu_low" {
@@ -416,58 +636,5 @@ resource "aws_cloudwatch_metric_alarm" "cpu_low" {
     AutoScalingGroupName = aws_autoscaling_group.main.name
   }
 
-  alarm_description = "This metric monitors ec2 cpu utilization"
-  alarm_actions     = [aws_autoscaling_policy.scale_down.arn]
-}
-
-# IAM role and instance profile for SSM access
-resource "aws_iam_role" "ec2_ssm_role" {
-  name = "${var.project_name}-ec2-ssm-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Action = "sts:AssumeRole",
-        Effect = "Allow",
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ec2_ssm_core" {
-  role       = aws_iam_role.ec2_ssm_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "ec2_ssm_profile" {
-  name = "${var.project_name}-ec2-ssm-profile"
-  role = aws_iam_role.ec2_ssm_role.name
-}
-
-resource "aws_acm_certificate" "alb" {
-  count             = var.enable_https && var.domain_name != "" ? 1 : 0
-  domain_name       = local.cert_domain
-  validation_method = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_lb_listener" "https" {
-  count             = var.enable_https && var.domain_name != "" ? 1 : 0
-  load_balancer_arn = aws_lb.main.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.alb[0].arn
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.main.arn
-  }
+  alarm_actions = [aws_autoscaling_policy.scale_down.arn]
 }

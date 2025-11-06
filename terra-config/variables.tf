@@ -7,6 +7,7 @@ variable "aws_region" {
 variable "aws_profile" {
   description = "AWS CLI Profile"
   type        = string
+  default     = "default"
 }
 
 variable "project_name" {
@@ -109,5 +110,19 @@ variable "ssh_allowed_cidrs" {
   description = "List of CIDR blocks allowed to SSH into EC2 instances (use your IPs; empty list to disable SSH)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
+}
+
+variable "dockerhub_username" {
+  description = "DockerHub username for private repositories (leave empty for public repos)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "dockerhub_token" {
+  description = "DockerHub access token for private repositories (leave empty for public repos)"
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
