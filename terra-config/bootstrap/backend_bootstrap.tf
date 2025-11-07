@@ -20,7 +20,7 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "AWS CLI Profile"
+  description = "AWS CLI profile (optional)"
   type        = string
   default     = ""
 }
@@ -31,6 +31,12 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "create_bucket" {
+  description = "Create the S3 bucket if it does not exist"
+  type        = bool
+  default     = true
+}
+
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -38,6 +44,7 @@ locals {
 }
 
 resource "aws_s3_bucket" "tf_state" {
+  count         = var.create_bucket ? 1 : 0
   bucket        = local.state_bucket_name
   force_destroy = false
 
@@ -53,30 +60,33 @@ resource "aws_s3_bucket" "tf_state" {
 }
 
 resource "aws_s3_bucket_versioning" "tf_state" {
-  bucket = aws_s3_bucket.tf_state.id
+  bucket = local.state_bucket_name
   versioning_configuration {
     status = "Enabled"
   }
+  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
-  bucket = aws_s3_bucket.tf_state.id
+  bucket = local.state_bucket_name
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
   }
+  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_public_access_block" "tf_state" {
-  bucket                  = aws_s3_bucket.tf_state.id
+  bucket                  = local.state_bucket_name
   block_public_acls       = true
   ignore_public_acls      = true
   block_public_policy     = true
   restrict_public_buckets = true
+  depends_on              = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 output "state_bucket_name" {
-  value       = aws_s3_bucket.tf_state.bucket
-  description = "Name of the S3 bucket used for Terraform backend state"
+  value       = local.state_bucket_name
+  description = "S3 bucket name used for Terraform backend state"
 }
