@@ -90,34 +90,24 @@ jobs:
           set -euo pipefail
           ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
           echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
-
-      - name: Ensure Terraform backend (S3 only)
+      - name: Bootstrap Terraform backend bucket (Terraform-managed)
         run: |
           set -euo pipefail
-          REGION="${AWS_REGION}"
-          ACCOUNT_ID="${ACCOUNT_ID}"
-          BUCKET="tfstate-${ACCOUNT_ID}-${REGION}"
-          KEY="${ENVIRONMENT}/terraform.tfstate"
+          cd "${WORKING_DIR}"
+          BUCKET="tfstate-${ACCOUNT_ID}-${AWS_REGION}"
 
-          echo "Ensuring S3 bucket: $BUCKET in $REGION"
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket exists."
+            echo "Backend bucket $BUCKET đã tồn tại - bỏ qua bootstrap."
           else
-            if [ "$REGION" = "us-east-1" ]; then
-              aws s3api create-bucket --bucket "$BUCKET"
-            else
-              aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
-            fi
-            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
-            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-            aws s3api put-bucket-public-access-block --bucket "$BUCKET" --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
-            echo "Bucket created and configured."
+            echo "Bootstrap tạo backend bucket $BUCKET bằng Terraform (local state)."
+            terraform init -backend=false
+            terraform apply -auto-approve -target=aws_s3_bucket.tf_state
           fi
 
           echo "TF_BACKEND_BUCKET=$BUCKET" >> $GITHUB_ENV
-          echo "TF_BACKEND_KEY=$KEY" >> $GITHUB_ENV
+          echo "TF_BACKEND_KEY=${ENVIRONMENT}/terraform.tfstate" >> $GITHUB_ENV
 
-      - name: Terraform Init (S3 backend)
+      - name: Terraform Init (switch to remote S3 backend)
         run: |
           set -euo pipefail
           terraform init -input=false -migrate-state -reconfigure \
@@ -129,7 +119,7 @@ jobs:
       - name: Select/Create Workspace
         run: |
           terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
-
+    
       - name: Detect infra changes
         id: diff
         shell: bash
