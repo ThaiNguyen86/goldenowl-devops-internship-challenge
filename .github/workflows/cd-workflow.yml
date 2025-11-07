@@ -90,10 +90,10 @@ jobs:
           set -euo pipefail
           ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
           echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
-      - name: Bootstrap Terraform backend bucket (Terraform-managed)
+
+      - name: Bootstrap Terraform backend bucket 
         run: |
           set -euo pipefail
-          cd "${WORKING_DIR}"
           BUCKET="tfstate-${ACCOUNT_ID}-${AWS_REGION}"
 
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
