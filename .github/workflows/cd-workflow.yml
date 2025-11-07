@@ -84,12 +84,51 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      - name: Get AWS Account ID
+        id: aws_account
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+
+      - name: Ensure Terraform backend (S3 only)
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION}"
+          ACCOUNT_ID="${ACCOUNT_ID}"
+          BUCKET="tfstate-${ACCOUNT_ID}-${REGION}"
+          KEY="${ENVIRONMENT}/terraform.tfstate"
+
+          echo "Ensuring S3 bucket: $BUCKET in $REGION"
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket exists."
+          else
+            if [ "$REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET"
+            else
+              aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
+            fi
+            aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+            aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+            aws s3api put-bucket-public-access-block --bucket "$BUCKET" --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+            echo "Bucket created and configured."
+          fi
+
+          echo "TF_BACKEND_BUCKET=$BUCKET" >> $GITHUB_ENV
+          echo "TF_BACKEND_KEY=$KEY" >> $GITHUB_ENV
+
+      - name: Terraform Init (S3 backend)
+        run: |
+          set -euo pipefail
+          terraform init -input=false -migrate-state -reconfigure \
+            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+            -backend-config="key=${TF_BACKEND_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true"
+
       - name: Select/Create Workspace
         run: |
           terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
-
-      - name: Terraform Init
-        run: terraform init -input=false
 
       - name: Detect infra changes
         id: diff
@@ -233,12 +272,12 @@ jobs:
           echo "Timeout waiting for instance refresh to complete"
           exit 1
 
-      - name: Wait 5 minutes before auto-destroy
-        if: ${{ success() }}
+      - name: Wait 5 minutes before auto-destroy (dev only)
+        if: ${{ success() && env.ENVIRONMENT == 'dev' }}
         run: sleep 300
 
-      - name: Auto-destroy infrastructure after success
-        if: ${{ success() }}
+      - name: Auto-destroy infrastructure after success (dev only)
+        if: ${{ success() && env.ENVIRONMENT == 'dev' }}
         run: |
           set -euo pipefail
           echo "Starting infrastructure destruction after successful deploy..."
