@@ -327,7 +327,6 @@ resource "aws_iam_role_policy_attachment" "ssm_managed_instance_core" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# IAM policy to allow EC2 to read SSM parameters for Docker credentials
 resource "aws_iam_role_policy" "ssm_parameter_access" {
   name = "${var.project_name}-ssm-parameter-access"
   role = aws_iam_role.ec2_ssm_role.id
@@ -377,7 +376,6 @@ locals {
   use_docker_auth   = var.dockerhub_username != "" && var.dockerhub_token != ""
 }
 
-# Store Docker credentials in AWS Systems Manager Parameter Store
 resource "aws_ssm_parameter" "dockerhub_username" {
   count       = local.use_docker_auth ? 1 : 0
   name        = "/${var.project_name}/dockerhub/username"
