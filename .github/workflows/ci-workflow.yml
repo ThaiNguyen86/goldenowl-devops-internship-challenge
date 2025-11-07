@@ -42,32 +42,21 @@ jobs:
     name: Terraform Validate
     runs-on: ubuntu-22.04
     needs: changes
-    if: (github.event_name == 'pull_request' || github.event_name == 'push') && needs.changes.outputs.infra == 'true'
+    if: (github.event_name == 'pull_request') && needs.changes.outputs.infra == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Detect terra-config changes
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            infra:
-              - 'terra-config/**'
-
       - name: Setup Terraform
-        if: steps.filter.outputs.infra == 'true'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: '1.9.0'
 
       - name: Terraform init (no backend)
-        if: steps.filter.outputs.infra == 'true'
         working-directory: ./terra-config
         run: terraform init -backend=false
 
       - name: Terraform validate
-        if: steps.filter.outputs.infra == 'true'
         working-directory: ./terra-config
         run: terraform validate
 
@@ -154,3 +143,4 @@ jobs:
           echo "Also tagged as: ${{ env.DOCKER_IMAGE }}:${{ env.LATEST_TAG }}"
           echo "Branch: ${{ github.ref_name }}"
           echo "SHA: ${{ github.sha }}"
+
