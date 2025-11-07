@@ -94,7 +94,7 @@ jobs:
       - name: Bootstrap Terraform backend bucket (bootstrap module)
         run: |
             set -euo pipefail
-            cd "/bootstrap"
+            cd "${WORKING_DIR}/bootstrap"
             terraform init -backend=false
             terraform apply -auto-approve
             BUCKET=$(terraform output -raw state_bucket_name)
