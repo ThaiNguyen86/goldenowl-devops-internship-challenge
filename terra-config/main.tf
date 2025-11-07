@@ -382,6 +382,7 @@ resource "aws_ssm_parameter" "dockerhub_username" {
   description = "DockerHub username for pulling private images"
   type        = "String"
   value       = var.dockerhub_username
+  overwrite   = true
 
   tags = {
     Name        = "${var.project_name}-dockerhub-username"
@@ -395,7 +396,7 @@ resource "aws_ssm_parameter" "dockerhub_token" {
   description = "DockerHub access token for pulling private images"
   type        = "SecureString"
   value       = var.dockerhub_token
-
+  overwrite   = true
   tags = {
     Name        = "${var.project_name}-dockerhub-token"
     Environment = var.environment
