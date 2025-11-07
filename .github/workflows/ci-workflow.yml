@@ -15,10 +15,34 @@ env:
   DOCKER_IMAGE: 'ngtthai/goldenowl-app'
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-22.04
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      infra: ${{ steps.filter.outputs.infra }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Paths filter
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            app:
+              - 'src/**'
+            infra:
+              - 'terra-config/**'
+            workflows:
+              - '.github/workflows/**'
+
   tf-validate:
     name: Terraform Validate
     runs-on: ubuntu-22.04
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: (github.event_name == 'pull_request' || github.event_name == 'push') && needs.changes.outputs.infra == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -50,7 +74,8 @@ jobs:
   test:
     name: Testing stage
     runs-on: ubuntu-22.04
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.app == 'true'
     defaults:
       run:
         working-directory: ./src
@@ -75,7 +100,8 @@ jobs:
   build-and-push:
     name: Build & Push Docker Image
     runs-on: ubuntu-22.04
-    if: github.event_name == 'push'
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.app == 'true'
     
     steps:
       - name: Checkout code

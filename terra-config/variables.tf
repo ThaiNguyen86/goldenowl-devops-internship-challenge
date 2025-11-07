@@ -112,3 +112,17 @@ variable "ssh_allowed_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "dockerhub_username" {
+  description = "DockerHub username for private repositories (leave empty for public repos)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "dockerhub_token" {
+  description = "DockerHub access token for private repositories (leave empty for public repos)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
