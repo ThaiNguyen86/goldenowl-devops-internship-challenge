@@ -37,6 +37,12 @@ variable "create_bucket" {
   description = "Create the S3 bucket if it does not exist"
 }
 
+variable "create_bucket" {
+  description = "Create the S3 bucket if it does not exist"
+  type        = bool
+  default     = true
+}
+
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -64,6 +70,7 @@ resource "aws_s3_bucket_versioning" "tf_state" {
   versioning_configuration {
     status = "Enabled"
   }
+  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
@@ -73,6 +80,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
       sse_algorithm = "AES256"
     }
   }
+  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_public_access_block" "tf_state" {
@@ -81,6 +89,7 @@ resource "aws_s3_bucket_public_access_block" "tf_state" {
   ignore_public_acls      = true
   block_public_policy     = true
   restrict_public_buckets = true
+  depends_on              = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 output "state_bucket_name" {
