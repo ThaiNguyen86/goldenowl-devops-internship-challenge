@@ -14,27 +14,27 @@ provider "aws" {
 }
 
 variable "aws_region" {
-  description = "AWS Region"
   type        = string
   default     = "ap-southeast-1"
+  description = "AWS Region"
 }
 
 variable "aws_profile" {
-  description = "AWS CLI profile (optional)"
   type        = string
   default     = ""
+  description = "AWS CLI profile (optional)"
 }
 
 variable "environment" {
-  description = "Environment label for tagging"
   type        = string
   default     = "dev"
+  description = "Environment label for tagging"
 }
 
 variable "create_bucket" {
-  description = "Create the S3 bucket if it does not exist"
   type        = bool
   default     = true
+  description = "Create the S3 bucket if it does not exist"
 }
 
 data "aws_caller_identity" "current" {}
@@ -60,30 +60,27 @@ resource "aws_s3_bucket" "tf_state" {
 }
 
 resource "aws_s3_bucket_versioning" "tf_state" {
-  bucket = local.state_bucket_name
+  bucket = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
   versioning_configuration {
     status = "Enabled"
   }
-  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
-  bucket = local.state_bucket_name
+  bucket = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
   }
-  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_public_access_block" "tf_state" {
-  bucket                  = local.state_bucket_name
+  bucket                  = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
   block_public_acls       = true
   ignore_public_acls      = true
   block_public_policy     = true
   restrict_public_buckets = true
-  depends_on              = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 output "state_bucket_name" {
