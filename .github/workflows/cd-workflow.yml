@@ -107,6 +107,22 @@ jobs:
             echo "No infrastructure changes detected"
           fi
 
+      - name: Detect app changes
+        id: appdiff
+        shell: bash
+        run: |
+          set -e
+          CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo "")
+          echo "Changed files:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^(src/|package.json|src/Dockerfile)'; then
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "Application code has changed"
+          else
+            echo "app_changed=false" >> $GITHUB_OUTPUT
+            echo "No application changes detected"
+          fi
+
       - name: Check if existing infra exists
         id: check_state
         run: |
@@ -123,41 +139,57 @@ jobs:
       - name: Destroy existing infra (only if infra changed AND existing infra exists)
         if: steps.diff.outputs.infra_changed == 'true' && steps.check_state.outputs.has_existing_infra == 'true'
         run: |
+          set -euo pipefail
           echo "Destroying existing infrastructure before applying new changes..."
-          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" 2>&1 | tee /tmp/tf-destroy.log
+          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" |& tee /tmp/tf-destroy.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "Terraform destroy failed with status $status"
+            exit $status
+          fi
           echo "Destroy completed"
 
       - name: Apply infra
         run: |
+          set -euo pipefail
           echo "Starting Terraform apply..."
           terraform apply -auto-approve -input=false \
             -var-file="environments/${ENVIRONMENT}.tfvars" \
             -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
-            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
-            2>&1 | tee /tmp/tf-apply.log
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" |& tee /tmp/tf-apply.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "Terraform apply failed with status $status"
+            exit $status
+          fi
           echo "Apply completed successfully"
 
-      - name: Read outputs
-        id: tfout
-        run: |
-          echo "alb_dns=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
-          echo "asg_name=$(terraform output -raw autoscaling_group_name)" >> $GITHUB_OUTPUT
-          if terraform output -raw app_port >/dev/null 2>&1; then echo "app_port=$(terraform output -raw app_port)" >> $GITHUB_OUTPUT; else echo "app_port=3000" >> $GITHUB_OUTPUT; fi
-
       - name: Trigger Instance Refresh
+        if: ${{ steps.appdiff.outputs.app_changed == 'true' || steps.diff.outputs.infra_changed == 'true' }}
         run: |
           ASG_NAME="${{ steps.tfout.outputs.asg_name }}"
           echo "Triggering instance refresh for ASG: $ASG_NAME"
           
-          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+          # Check if a refresh is already in progress and reuse it
+          EXISTING_STATUS=$(aws autoscaling describe-instance-refreshes \
             --auto-scaling-group-name "$ASG_NAME" \
-            --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":300}' \
-            --query 'InstanceRefreshId' --output text)
+            --query 'InstanceRefreshes[0].Status' --output text 2>/dev/null || echo "None")
+          if [ "$EXISTING_STATUS" = "InProgress" ]; then
+            REFRESH_ID=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --query 'InstanceRefreshes[0].InstanceRefreshId' --output text)
+            echo "Found existing in-progress refresh: $REFRESH_ID"
+          else
+            REFRESH_ID=$(aws autoscaling start-instance-refresh \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":300}' \
+              --query 'InstanceRefreshId' --output text)
+            echo "Started new instance refresh: $REFRESH_ID"
+          fi
           
-          echo "Instance Refresh ID: $REFRESH_ID"
           echo "Waiting for instance refresh to complete..."
           
-          for i in $(seq 1 60); do
+          for i in $(seq 1 30); do
             STATUS=$(aws autoscaling describe-instance-refreshes \
               --auto-scaling-group-name "$ASG_NAME" \
               --instance-refresh-ids "$REFRESH_ID" \
@@ -178,68 +210,45 @@ jobs:
               exit 1
             fi
             
-            sleep 30
+            sleep 20
           done
           
           echo "Timeout waiting for instance refresh to complete"
           exit 1
 
-      - name: Cleanup on Terraform apply failure
-        if: failure()
+      - name: Wait 5 minutes before auto-destroy
+        if: ${{ success() }}
+        run: sleep 300
+
+      - name: Auto-destroy infrastructure after success
+        if: ${{ success() }}
         run: |
-          echo "Terraform apply failed, cleaning up resources..."
+          set -euo pipefail
+          echo "Starting infrastructure destruction after successful deploy..."
           terraform destroy -auto-approve -input=false \
             -var-file="environments/${ENVIRONMENT}.tfvars" \
             -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
-            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
-            2>&1 | tee /tmp/tf-destroy-on-fail.log
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" |& tee /tmp/tf-destroy-success.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "Terraform destroy (post-success) failed with status $status"
+            exit $status
+          fi
+          echo "Post-success destroy completed"
 
-  auto-destroy-dev:
-    name: Auto-destroy dev after 5 minutes
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    needs: deploy-infra
-    if: >-
-      ${{ always() && ((github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev') ||
-           (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != 'master')) }}
-    defaults:
-      run:
-        working-directory: ${{ env.WORKING_DIR }}
-    steps:
-      - name: Checkout code at CI commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - name: Select Workspace dev & init
+      - name: Cleanup on Terraform failure or cancel
+        if: ${{ failure() || cancelled() }}
         run: |
-          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
-          terraform workspace select dev || terraform workspace new dev
-          terraform init -input=false
-
-      - name: Wait 5 minutes (only on success)
-        if: ${{ needs.deploy-infra.result == 'success' }}
-        run: sleep 300
-
-      - name: Destroy dev infra
-        run: |
-          echo "Starting dev infrastructure destruction..."
+          set -euo pipefail
+          echo "Terraform apply failed or workflow cancelled, cleaning up resources..."
           terraform destroy -auto-approve -input=false \
-            -var-file="environments/dev.tfvars" \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
             -var="dockerhub_username=${{ secrets.DOCKERHUB_USER }}" \
-            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" \
-            2>&1 | tee /tmp/tf-destroy-dev.log
-          echo "Dev infrastructure destroyed successfully"
+            -var="dockerhub_token=${{ secrets.DOCKERHUB_PAT }}" |& tee /tmp/tf-destroy-on-fail.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "Terraform destroy (cleanup) failed with status $status"
+            exit $status
+          fi
+          echo "Cleanup destroy completed"
+
