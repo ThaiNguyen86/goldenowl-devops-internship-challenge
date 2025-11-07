@@ -1,3 +1,4 @@
+// Backend S3 is bootstrapped via separate module (terra-config/bootstrap). Removed from main stack.
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -382,6 +383,7 @@ resource "aws_ssm_parameter" "dockerhub_username" {
   description = "DockerHub username for pulling private images"
   type        = "String"
   value       = var.dockerhub_username
+  overwrite   = true
 
   tags = {
     Name        = "${var.project_name}-dockerhub-username"
@@ -395,7 +397,7 @@ resource "aws_ssm_parameter" "dockerhub_token" {
   description = "DockerHub access token for pulling private images"
   type        = "SecureString"
   value       = var.dockerhub_token
-
+  overwrite   = true
   tags = {
     Name        = "${var.project_name}-dockerhub-token"
     Environment = var.environment
@@ -418,7 +420,7 @@ resource "aws_launch_template" "main" {
     security_groups             = [aws_security_group.ec2.id]
   }
 
-    user_data = base64encode(<<-EOF
+  user_data = base64encode(<<-EOF
         #!/bin/bash
         set -uxo pipefail
         exec > >(tee -a /var/log/user-data.log) 2>&1
