@@ -1,3 +1,51 @@
+data "aws_caller_identity" "current" {}
+
+locals {
+  state_bucket_name = "tfstate-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+}
+
+resource "aws_s3_bucket" "tf_state" {
+  bucket        = local.state_bucket_name
+  force_destroy = false
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  tags = {
+    Name        = local.state_bucket_name
+    Purpose     = "terraform-backend"
+    Environment = var.environment
+  }
+}
+
+resource "aws_s3_bucket_versioning" "tf_state" {
+  bucket = aws_s3_bucket.tf_state.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
+  bucket = aws_s3_bucket.tf_state.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "tf_state" {
+  bucket                  = aws_s3_bucket.tf_state.id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+output "state_bucket_name" {
+  value = aws_s3_bucket.tf_state.bucket
+}
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -419,7 +467,7 @@ resource "aws_launch_template" "main" {
     security_groups             = [aws_security_group.ec2.id]
   }
 
-    user_data = base64encode(<<-EOF
+  user_data = base64encode(<<-EOF
         #!/bin/bash
         set -uxo pipefail
         exec > >(tee -a /var/log/user-data.log) 2>&1
