@@ -32,13 +32,7 @@ variable "environment" {
 }
 
 variable "create_bucket" {
-  type        = bool
-  default     = true
-  description = "Create the S3 bucket if it does not exist"
-}
-
-variable "create_bucket" {
-  description = "Create the S3 bucket if it does not exist"
+  description = "Whether to create the S3 bucket if it doesn't exist"
   type        = bool
   default     = true
 }
@@ -65,31 +59,38 @@ resource "aws_s3_bucket" "tf_state" {
   }
 }
 
+data "aws_s3_bucket" "existing" {
+  count  = var.create_bucket ? 0 : 1
+  bucket = local.state_bucket_name
+}
+
+locals {
+  bucket_id = var.create_bucket ? aws_s3_bucket.tf_state[0].id : data.aws_s3_bucket.existing[0].id
+}
+
+
 resource "aws_s3_bucket_versioning" "tf_state" {
-  bucket = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
+  bucket = local.bucket_id
   versioning_configuration {
     status = "Enabled"
   }
-  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "tf_state" {
-  bucket = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
+  bucket = local.bucket_id
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
   }
-  depends_on = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 resource "aws_s3_bucket_public_access_block" "tf_state" {
-  bucket                  = var.create_bucket ? aws_s3_bucket.tf_state[0].id : local.state_bucket_name
+  bucket                  = local.bucket_id
   block_public_acls       = true
   ignore_public_acls      = true
   block_public_policy     = true
   restrict_public_buckets = true
-  depends_on              = var.create_bucket ? [aws_s3_bucket.tf_state] : []
 }
 
 output "state_bucket_name" {
