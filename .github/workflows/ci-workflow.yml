@@ -39,7 +39,18 @@ jobs:
               - 'terra-config/**'
             workflows:
               - '.github/workflows/**'
+      - name: Save filter outputs
+        run: |
+          mkdir -p changes-output
+          echo "${{ steps.filter.outputs.app }}" > changes-output/app_changed.txt
+          echo "${{ steps.filter.outputs.infra }}" > changes-output/infra_changed.txt
 
+      - name: Upload filter outputs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: changes-output-${{ github.sha }}
+          path: changes-output/  
+          
   tf-validate:
     name: Terraform Validate
     runs-on: ubuntu-22.04

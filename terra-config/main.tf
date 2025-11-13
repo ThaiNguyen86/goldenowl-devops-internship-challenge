@@ -1,4 +1,4 @@
-// Backend S3 is bootstrapped via separate module (terra-config/bootstrap). Removed from main stack.
+
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -537,7 +537,7 @@ resource "aws_launch_template" "main" {
 }
 
 resource "aws_autoscaling_group" "main" {
-  name                      = "${var.project_name}-asg-${aws_launch_template.main.latest_version}"
+  name                      = "${var.project_name}-asg"
   desired_capacity          = var.asg_desired_capacity
   min_size                  = var.asg_min_size
   max_size                  = var.asg_max_size

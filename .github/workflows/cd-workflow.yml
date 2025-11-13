@@ -37,6 +37,23 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
+      - name: Download filter outputs from CI (if workflow_run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: changes-output-${{ github.event.workflow_run.head_sha }}
+          path: changes-output/
+
+      - name: Read filter outputs (if workflow_run)
+        if: github.event_name == 'workflow_run'
+        id: changes
+        run: |
+          APP_CHANGED=$(cat changes-output/app_changed.txt)
+          INFRA_CHANGED=$(cat changes-output/infra_changed.txt)
+          echo "app_changed=${APP_CHANGED}" >> $GITHUB_OUTPUT
+          echo "infra_changed=${INFRA_CHANGED}" >> $GITHUB_OUTPUT
+          echo "CI reported app_changed: ${APP_CHANGED}"
+          echo "CI reported infra_changed: ${INFRA_CHANGED}"
 
       - name: Determine environment
         id: env
@@ -126,64 +143,6 @@ jobs:
       - name: Select/Create Workspace
         run: |
           terraform workspace select ${ENVIRONMENT} || terraform workspace new ${ENVIRONMENT}
-    
-      - name: Detect infra changes
-        id: diff
-        shell: bash
-        run: |
-          set -e
-          CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo "")
-          echo "Changed files:"
-          echo "$CHANGED"
-          if echo "$CHANGED" | grep -qE '^terra-config/'; then
-            echo "infra_changed=true" >> $GITHUB_OUTPUT
-            echo "Infrastructure code has changed"
-          else
-            echo "infra_changed=false" >> $GITHUB_OUTPUT
-            echo "No infrastructure changes detected"
-          fi
-
-      - name: Detect app changes
-        id: appdiff
-        shell: bash
-        run: |
-          set -e
-          CHANGED=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo "")
-          echo "Changed files:"
-          echo "$CHANGED"
-          if echo "$CHANGED" | grep -qE '^(src/|package.json|src/Dockerfile)'; then
-            echo "app_changed=true" >> $GITHUB_OUTPUT
-            echo "Application code has changed"
-          else
-            echo "app_changed=false" >> $GITHUB_OUTPUT
-            echo "No application changes detected"
-          fi
-
-      - name: Check if existing infra exists
-        id: check_state
-        run: |
-          STATE_COUNT=$(terraform state list 2>/dev/null | wc -l || echo "0")
-          echo "Existing resources count: ${STATE_COUNT}"
-          if [ "$STATE_COUNT" -gt 0 ]; then
-            echo "has_existing_infra=true" >> $GITHUB_OUTPUT
-            echo "Found ${STATE_COUNT} existing resources in state"
-          else
-            echo "has_existing_infra=false" >> $GITHUB_OUTPUT
-            echo "No existing infrastructure found"
-          fi
-
-      - name: Destroy existing infra (only if infra changed AND existing infra exists)
-        if: steps.diff.outputs.infra_changed == 'true' && steps.check_state.outputs.has_existing_infra == 'true'
-        run: |
-          set -euo pipefail
-          echo "Destroying existing infrastructure before applying new changes..."
-          terraform destroy -auto-approve -input=false -var-file="environments/${ENVIRONMENT}.tfvars" |& tee /tmp/tf-destroy.log
-          status=${PIPESTATUS[0]}
-          if [ $status -ne 0 ]; then
-            echo "Terraform destroy failed with status $status"
-            exit $status
-          fi
-          echo "Destroy completed"
 
       - name: Apply infra
         run: |
@@ -218,7 +177,10 @@ jobs:
           echo "app_port=${APP_PORT}" >> $GITHUB_OUTPUT
 
       - name: Trigger Instance Refresh
-        if: ${{ steps.appdiff.outputs.app_changed == 'true' || steps.diff.outputs.infra_changed == 'true' }}
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'workflow_run' && steps.changes.outputs.app_changed == 'true') ||
+          (github.event_name == 'workflow_run' && steps.changes.outputs.infra_changed == 'true')
         run: |
           ASG_NAME="${{ steps.tfout.outputs.asg_name }}"
           echo "Triggering instance refresh for ASG: $ASG_NAME"
@@ -290,7 +252,7 @@ jobs:
           echo "Post-success destroy completed"
 
       - name: Cleanup on Terraform failure or cancel
-        if: ${{ failure() || cancelled() }}
+        if: ${{ (failure() || cancelled()) && env.ENVIRONMENT == 'dev' }}
         run: |
           set -euo pipefail
           echo "Terraform apply failed or workflow cancelled, cleaning up resources..."
