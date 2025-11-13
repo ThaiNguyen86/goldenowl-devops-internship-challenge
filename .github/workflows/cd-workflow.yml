@@ -101,44 +101,10 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Get AWS Account ID
-        id: aws_account
+      - name: Terraform Init
         run: |
           set -euo pipefail
-          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-          echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
-
-      - name: Bootstrap Terraform backend bucket (bootstrap module)
-        run: |
-          set -euo pipefail
-          cd "bootstrap"  # working-directory đã là terra-config
-          terraform init -backend=false
-
-          BUCKET="tfstate-${ACCOUNT_ID}-${AWS_REGION}"
-          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket $BUCKET exists - will not create."
-            CREATE_VAR="-var=create_bucket=false"
-          else
-            echo "Bucket $BUCKET not found - will create."
-            CREATE_VAR="-var=create_bucket=true"
-          fi
-
-          terraform apply -auto-approve $CREATE_VAR \
-            -var="aws_region=${AWS_REGION}" \
-            -var="environment=${ENVIRONMENT}"
-
-          OUT_BUCKET=$(terraform output -raw state_bucket_name)
-          echo "TF_BACKEND_BUCKET=$OUT_BUCKET" >> $GITHUB_ENV
-          echo "TF_BACKEND_KEY=${ENVIRONMENT}/terraform.tfstate" >> $GITHUB_ENV
-
-      - name: Terraform Init (switch to remote S3 backend)
-        run: |
-          set -euo pipefail
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${TF_BACKEND_BUCKET}" \
-            -backend-config="key=${TF_BACKEND_KEY}" \
-            -backend-config="region=${AWS_REGION}" \
-            -backend-config="encrypt=true"
+          terraform init -input=false
 
       - name: Select/Create Workspace
         run: |

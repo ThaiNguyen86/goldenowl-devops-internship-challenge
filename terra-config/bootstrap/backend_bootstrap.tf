@@ -97,3 +97,23 @@ output "state_bucket_name" {
   value       = local.state_bucket_name
   description = "S3 bucket name used for Terraform backend state"
 }
+
+resource "aws_dynamodb_table" "terraform_lock" {
+  name         = "terraform-lock" 
+  hash_key     = "LockID"
+  billing_mode = "PAY_PER_REQUEST"
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+
+  tags = {
+    Name    = "Terraform State Lock"
+    Purpose = "terraform-backend"
+  }
+}
+
+output "lock_table_name" {
+  value = aws_dynamodb_table.terraform_lock.name
+}

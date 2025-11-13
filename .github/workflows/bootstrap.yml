@@ -1,0 +1,71 @@
+name: TF - Bootstrap Backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment (chỉ dùng để tag)"
+        required: true
+        default: "dev"
+
+env:
+  TF_VERSION: '1.9.0'
+  AWS_REGION: 'ap-southeast-1'
+  WORKING_DIR: './terra-config/bootstrap' 
+
+jobs:
+  bootstrap:
+    name: Create/Verify S3 Backend
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Get AWS Account ID
+        id: aws_account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+
+      - name: Terraform Init (no backend)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init -backend=false
+
+      - name: Terraform Apply (Create S3 Backend + Lock Table)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          set -euo pipefail
+          BUCKET="tfstate-${ACCOUNT_ID}-${AWS_REGION}"
+          
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket $BUCKET exists - will not create."
+            CREATE_VAR="-var=create_bucket=false"
+          else
+            echo "Bucket $BUCKET not found - will create."
+            CREATE_VAR="-var=create_bucket=true"
+          fi
+
+          terraform apply -auto-approve $CREATE_VAR \
+            -var="aws_region=${AWS_REGION}" \
+            -var="environment=${{ github.event.inputs.environment }}"
+
+      - name: Show Results
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          echo "--- HOÀN THÀNH BOOTSTRAP ---"
+          echo "Terraform state bucket là: $(terraform output -raw state_bucket_name)"
+          echo "Terraform lock table là: $(terraform output -raw lock_table_name)"
+          echo "Bạn chỉ cần chạy workflow này MỘT LẦN cho mỗi tài khoản AWS."
